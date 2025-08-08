@@ -5,6 +5,7 @@ import logging
 import time
 import uuid
 import requests
+import textwrap
 from datetime import datetime, timedelta, timezone
 
 from stream_uptime import get_channel_id, get_live_status_and_vod
@@ -37,6 +38,16 @@ HERMES_URL = "wss://hermes.twitch.tv/v1?clientId=kimne78kx3ncx6brgo4mv6wki5h1ko"
 USER_ID = get_channel_id(CHANNEL)
 
 # ========== TOKEN HANDLING ==========
+
+def split_message(message, max_length=500):
+    return textwrap.wrap(
+        message,
+        width=max_length,
+        break_long_words=True,
+        break_on_hyphens=True,
+        placeholder='-',
+    )
+
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
@@ -132,6 +143,13 @@ class TwitchBot:
         if self.ws:
             await self.ws.send(f"PRIVMSG #{CHANNEL} :{text}")
             logging.info("💬 Sent: %s", text)
+
+    async def send_message(self, text):
+        for msg in split_message(text):
+            await self.ws.send(f"PRIVMSG #{CHANNEL} :{msg}")
+            logging.info("💬 Fragment: %s", msg)
+            await asyncio.sleep(1.2)
+        logging.info("💬 Sent: %s", text)
 
     async def listen(self):
         async for message in self.ws:
