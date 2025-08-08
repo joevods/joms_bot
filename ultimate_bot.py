@@ -243,16 +243,19 @@ class HermesClient:
                 choices_str = ''.join(f'【{c["title"]}】' for c in choices)
                 await self.on_event(f'MrDestructoid POLL {title}: {choices_str}')
 
-            case {'type': 'POLL_COMPLETE', 'data': {'poll': {'title':title, 'choices': choices, 'total_voters': total_voters}}}:
-                logging.info(f'poll end: {pubsub}')
-                print(f'POLL FINISH: {title}')
+            case {'type': poll_type, 'data': {'poll': {'title':title, 'choices': choices, 'total_voters': total_voters}}} if poll_type in ('POLL_COMPLETE', 'POLL_TERMINATE'):
+                logging.info(f'{poll_type}: {pubsub}')
+                print(f'{poll_type}: {title}')
                 results = [(c['total_voters'] / total_voters * 100, c['title']) for c in choices]
                 results = sorted(results, key=lambda x: x[0], reverse=True)
                 for perc, choice in results:
                     print(f'  {perc:2.0f}% {choice}')
 
                 result_str = ''.join(f'【{perc:2.0f}% {choice}】' for perc, choice in results)
-                await self.on_event(f'MrDestructoid POLL RESULTS {title}: {result_str}')
+                if poll_type == 'POLL_COMPLETE':
+                    await self.on_event(f'MrDestructoid POLL RESULTS {title}: {result_str}')
+                else:
+                    await self.on_event(f'MrDestructoid POLL TERMINATED {title}: {result_str}')
 
             case {'type': 'event-created', 'data': {'event': {'outcomes': outcomes, 'title': title, 'status':'ACTIVE'}}}:
                 logging.info(f'bet start: {pubsub}')
