@@ -98,6 +98,9 @@ class TwitchBot:
     def __init__(self):
         self.ws = None
 
+        self.backoffs = [0, 1, 5, 10, 30, 60]
+        self.backoff_idx = 0
+
     async def connect(self):
         while True:
             try:
@@ -112,7 +115,11 @@ class TwitchBot:
                     await self.listen()
             except Exception as e:
                 logging.exception("Chat bot error: %s", e)
-            await asyncio.sleep(5)
+
+
+            delay = self.backoffs[self.backoff_idx]
+            self.backoff_idx = min(self.backoff_idx + 1, len(self.backoffs) - 1)
+            await asyncio.sleep(delay)
 
     async def authenticate(self, token):
         await self.ws.send(f"PASS oauth:{token}")
@@ -131,6 +138,7 @@ class TwitchBot:
             if message.startswith("PING"):
                 await self.ws.send("PONG :tmi.twitch.tv")
 
+            self.backoff_idx = 0
             logging.debug(f'CHAT: {message}')
 
 # ========== EVENT LISTENER ==========
