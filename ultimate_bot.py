@@ -268,9 +268,11 @@ class HermesClient:
             case {'type': 'event-updated', 'data': {'event': {'outcomes': outcomes, 'title': title, 'status':'RESOLVED', 'winning_outcome_id': win_id}}}:
                 logging.info(f'bet end: {pubsub}')
                 win_outcome = [o for o in outcomes if o['id'] == win_id][0]
-                print(f'BET OUTCOME: {title} - {win_outcome['title']}')
-                choices = ''.join(f'【{o["title"]}】' for o in outcomes)
-                await self.on_event(f'MrDestructoid BET OUTCOME {title}: 【{win_outcome["title"]}】')
+                total_points = sum(o['total_points'] for o in outcomes)
+                odds = total_points / win_outcome['total_points']
+
+                print(f'BET OUTCOME {title}: 【{win_outcome["title"]}】 {win_outcome['total_users']} weebs won {total_points:,d} monocoins, {odds:.2f}/1 odds')
+                await self.on_event(f'MrDestructoid BET OUTCOME {title}: 【{win_outcome["title"]}】 {win_outcome['total_users']} weebs won {total_points:,d} monocoins, {odds:.2f}/1 odds')
 
             case {'type': 'event-updated', 'data': {'event': {'status':status}}} if status in ('ACTIVE', 'LOCKED', 'RESOLVE_PENDING',):
                 # states while bet is in progress gets ignored
