@@ -1,4 +1,5 @@
 import asyncio
+import re
 import websockets
 import json
 import logging
@@ -15,7 +16,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.FileHandler('twitch_events.log', mode='w'),
+        logging.FileHandler('twitch_events.log', mode='a'),
         # logging.StreamHandler()
     ]
 )
@@ -30,9 +31,6 @@ with open('client_auth.json') as f:
 BOT_NICK = "joms_bot"
 CHANNEL = "andersonjph"
 # CHANNEL = "xire91"
-
-IRC_URL = "wss://irc-ws.chat.twitch.tv:443"
-HERMES_URL = "wss://hermes.twitch.tv/v1?clientId=kimne78kx3ncx6brgo4mv6wki5h1ko"
 
 # channel to follow events
 USER_ID = get_channel_id(CHANNEL)
@@ -105,6 +103,41 @@ def is_token_expired():
         return True
 
 # ========== CHAT BOT ==========
+IRC_URL = "wss://irc-ws.chat.twitch.tv:443"
+
+
+TMI_REGEX = re.compile(
+    r'^(?:@(?P<tags>[^ ]+)\s+)?'
+    r':(?:(?P<user>[^!]+)!)?.*?tmi\.twitch\.tv\s+'
+    r'(?P<command>[A-Z]+)'
+    r'(?:\s+(?P<channel>#[^ ]+))?'
+    r'(?:\s+:(?P<message>.*))?$'
+)
+
+def parse_tmi_message(raw: str) -> dict | None:
+    match = TMI_REGEX.match(raw)
+    if not match:
+        return None
+
+    # parse tags into dict if present
+    tags = {}
+    tags_raw = match.group("tags")
+    if tags_raw:
+        for tag in tags_raw.split(";"):
+            if "=" in tag:
+                k, v = tag.split("=", 1)
+                tags[k] = v
+            else:
+                tags[tag] = ""
+
+    return {
+        "tags": tags,
+        "user": match.group("user"),
+        "command": match.group("command"),
+        "channel": match.group("channel"),
+        "message": match.group("message"),
+    }
+
 class TwitchBot:
     def __init__(self):
         self.ws = None
@@ -152,12 +185,37 @@ class TwitchBot:
         logging.info("💬 Sent: %s", text)
 
     async def listen(self):
-        async for message in self.ws:
-            if message.startswith("PING"):
+        async for messages in self.ws:
+            if messages.startswith("PING"):
                 await self.ws.send("PONG :tmi.twitch.tv")
+                continue
 
+            await self.parse_chat_msg(messages)
             self.backoff_idx = 0
-            logging.debug(f'CHAT: {message}')
+
+    async def parse_chat_msg(self, messages):
+        for message in messages.splitlines():
+            parsed_msg = parse_tmi_message(message)
+            match parsed_msg:
+                case None:
+                    if re.match(r'^:(?:joms_bot\.)?tmi\.twitch\.tv \d{3} joms_bot .*$', message):
+                        logging.debug(f'known weird command: {message}')
+                    elif message.startswith(':tmi.twitch.tv CAP * ACK'):
+                        logging.debug(f'known weird command: {message}')
+                    else:
+                        logging.warning(f'could not parse TMI msg: {message}')
+
+                case {'user': username, 'command': 'PRIVMSG', 'message': msg}:
+                    # logging.info(f'{username}: {msg}')
+                    if (m := re.search(r'joms?[ _]?bot', msg)):
+                        logging.warning(f'CHAT MSG: {username} {msg}')
+
+                case {'command': cmd} if cmd in ['JOIN', 'PART', 'USERSTATE', 'USERNOTICE', 'CLEARMSG']:
+                    logging.debug(f'known command: {message}')
+                case _:
+                    logging.warning(f'uh oh parsing: {message}')
+
+# https://www.twitch.tv/andersonjph/clip/AuspiciousSteamyDragonfruitBudStar-DFurcIQmTmh3ncQR
 
 # ========== EVENT LISTENER ==========
 
@@ -166,7 +224,7 @@ TOPICS = [
     f'polls.{USER_ID}',                       # polls
     f'raid.{USER_ID}',                        # raids
     f'video-playback-by-id.{USER_ID}',        # stream up/down
-    f'predictions-channel-v1.{USER_ID}',      # bets ???
+    f'predictions-channel-v1.{USER_ID}',      # bets
 ]
 
 PUBSUBS_TO_IGNORE = (
@@ -180,6 +238,9 @@ PUBSUBS_TO_IGNORE = (
     'viewcount',
     'commercial',
 )
+
+HERMES_URL = "wss://hermes.twitch.tv/v1?clientId=kimne78kx3ncx6brgo4mv6wki5h1ko"
+
 class HermesClient:
     def __init__(self, on_event):
         self.url = HERMES_URL
@@ -189,6 +250,7 @@ class HermesClient:
         self.backoff_idx = 0
 
         self.letest_raid_id = None
+        self.allow_self_pins = True
 
     async def connect(self):
         headers = {
@@ -199,6 +261,7 @@ class HermesClient:
             try:
                 async with websockets.connect(self.url, additional_headers=headers) as ws:
                     await self.subscribe(ws)
+                    self.url = HERMES_URL
                     self.backoff_idx = 0
                     await self.listen(ws)
             except Exception as e:
@@ -228,16 +291,20 @@ class HermesClient:
         async for message in ws:
             try:
                 data = json.loads(message)
-                await self.handle_event(data)
+                result = await self.handle_event(data)
+                if result == 'reconnect':
+                    return
             except Exception:
                 logging.exception("Failed to parse event: %s", message)
 
     async def handle_event(self, data):
         match data:
-            case {'type': 'welcome'}:
+            case {'type': 'welcome', 'welcome': {'recoveryUrl': recoveryUrl}}:
                 logging.info(f'welcome: {data}')
-            case {'type': 'reconnect'}:
+            case {'type': 'reconnect', 'reconnect': {'url': reconnect_url}}:
+                self.url = reconnect_url
                 logging.info(f'reconnect order: {data}')
+                return 'reconnect'
             case {'type': 'subscribeResponse'}:
                 logging.info(f'subcribed: {data}')
             case {'type': 'keepalive'}:
@@ -253,9 +320,10 @@ class HermesClient:
             case {'type': 'pin-message', 'data': {'message': {'sender':{'display_name':name}, 'content': {'text': text, 'fragments': fragments}}}}:
                 logging.info(f'pin: {pubsub}')
                 print(f'PINNED {name}: {text}')
-                if name != 'joms_bot':
+                if self.allow_self_pins or name != 'joms_bot':
                     if any('link' in f for f in fragments):
-                        text = ''.join(('<link redacted>' if 'link' in f else f['text']) for f in fragments)
+                        # text = ''.join(('<link redacted>' if 'link' in f else f['text']) for f in fragments)
+                        text = ''.join(('< jphPout bot can\'t post links>' if 'link' in f else f['text']) for f in fragments)
                         logging.warning(f'removing link from pin: {text}')
                     await self.on_event(f'MrDestructoid PIN {name}: {text}')
                 else:
@@ -313,9 +381,11 @@ class HermesClient:
 
             case {'type': 'stream-up'}:
                 logging.info(f'stream up')
+                print(f'stream up' + '='*80)
 
             case {'type': 'stream-down'}:
                 logging.info(f'stream down')
+                print(f'stream down' + '='*80)
 
             case {'type': pubsub_type} if pubsub_type in PUBSUBS_TO_IGNORE:
                 logging.debug(f'ignoring pubsub {pubsub_type}')
